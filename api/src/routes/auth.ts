@@ -10,88 +10,71 @@ import jwt from "jsonwebtoken";
 import { createUser, type user } from "../models/user.model";
 
 type AuthenticatedRequest = Request & {
-  user?: any;
+  user?: jwt.JwtPayload | string;
+};
+
+type RegisterBody = {
+  email?: string;
+  password?: string;
+  age?: number | string;
+  name?: string;
+  role?: "aluno" | "professor" | number;
+};
+
+type LoginBody = {
+  email?: string;
+  password?: string;
 };
 
 const router = Router();
-const JWT_SECRET: any = process.env.JWT_SECRET;
+const JWT_SECRET: string = process.env.JWT_SECRET ?? "";
 
-// Middleware para verificar token
 export function verifyToken(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction,
 ) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.split(" ")[1]; // "Bearer token"
+  const token = authHeader?.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({ message: "Token não fornecido" });
+    return res.status(401).json({ message: "Token nao fornecido" });
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET as string);
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
-  } catch (error) {
-    return res.status(401).json({ message: "Token inválido ou expirado" });
+  } catch (_error) {
+    return res.status(401).json({ message: "Token invalido ou expirado" });
   }
 }
 
 export default async function auth() {
-  async function verifyExistUser(user: user, res: Response) {
-    const userInput = user;
-
-    if (!userInput) {
-      return res.status(401).json({ message: "Digite um usuario válido" });
-    }
-
-    if (userInput) {
-      try {
-        const data = await pool.query<user>(
-          `
-        SELECT id, email
+  async function verifyExistUser(email: string) {
+    const data = await pool.query<Pick<user, "email">>(
+      `
+        SELECT email
         FROM "user"
-        WHERE LOWER(email) = LOWER($1)`,
-          [user],
-        );
+        WHERE LOWER(email) = LOWER($1)
+      `,
+      [email.trim()],
+    );
 
-        const User: any = data.rows[0];
-
-        if (!User) {
-          return user;
-        }
-        if (User) {
-          return res.status(401).json({ message: "Usuario ja existente" });
-        }
-      } catch (error) {
-        console.log(error);
-      }
-    }
+    return Boolean(data.rows[0]);
   }
 
-  router.post("/register", async (req, res) => {
-    const { email, password, age, name, choice } = req.body;
-    const user: user = {
-      id: req.body.id,
-      email: req.body.email,
-      password: req.body.password,
-      name: req.body.name,
-      age: req.body.age
-    }
-    console.log("Informaçoes de cadastro chegaram:", user);
-    const UserExists = verifyExistUser(user, res)
-
-    if (!UserExists){
-      return user 
+  function normalizeRole(role: RegisterBody["role"]) {
+    if (role === "aluno" || role === 1) {
+      return 1;
     }
 
-
-    if (!createUser(user)){
-      return res.json({message:"erro"})
+    if (role === "professor" || role === 2) {
+      return 2;
     }
 
-  });
+    return null;
+  }
 
   async function AuthSign(user: user) {
     return jwt.sign(
@@ -100,7 +83,7 @@ export default async function auth() {
         email: user.email,
         role: user.role,
       },
-      JWT_SECRET as string,
+      JWT_SECRET,
       {
         expiresIn: "4h",
       },
@@ -111,65 +94,120 @@ export default async function auth() {
     return bcrypt.compare(inputPassword, storedHash);
   }
 
+  router.post("/register", async (req, res) => {
+    const { email, password, age, name, role } = req.body as RegisterBody;
+    const userRole = normalizeRole(role);
+
+    if (!name?.trim() || !email?.trim() || !password) {
+      return res.status(400).json({ message: "Preencha todos os campos" });
+    }
+
+    if (!Number.isInteger(Number(age)) || Number(age) <= 0) {
+      return res.status(400).json({ message: "Informe uma idade valida" });
+    }
+
+    if (!userRole) {
+      return res.status(400).json({ message: "Cargo invalido" });
+    }
+
+    if (password.length < 8) {
+      return res
+        .status(400)
+        .json({ message: "A senha deve ter no minimo 8 caracteres" });
+    }
+
+    try {
+      const userExists = await verifyExistUser(email.trim());
+
+      if (userExists) {
+        return res.status(409).json({ message: "Usuario ja existente" });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const newUser: user = {
+        email: email.trim(),
+        password: hashedPassword,
+        name: name.trim(),
+        age: Number(age),
+        role: userRole,
+      };
+
+      const userCreated = await createUser(newUser);
+
+      if (!userCreated) {
+        return res.status(500).json({ message: "Erro ao criar usuario" });
+      }
+
+      return res.status(201).json({ message: "Cadastro realizado com sucesso" });
+    } catch (error) {
+      console.error("Erro no cadastro:", error);
+      return res.status(500).json({ message: "Erro interno do servidor" });
+    }
+  });
+
   router.post("/login", async (req, res) => {
-    const { email, password } = req.body;
-    console.log("Informaçoes chegaram:", email, password);
-    const userInput = email.trim();
+    const { email, password } = req.body as LoginBody;
+    const userInput = email?.trim();
+
+    if (!userInput || !password) {
+      return res.status(400).json({ message: "Preencha email e senha" });
+    }
 
     try {
       const data = await pool.query<user>(
         `
-    SELECT id, name, email, role, age, password 
-    FROM "user"
-    WHERE LOWER(email) = LOWER($1) OR LOWER(name) = LOWER($1)
-    `,
+          SELECT id, name, email, role, age, password
+          FROM "user"
+          WHERE LOWER(email) = LOWER($1) OR LOWER(name) = LOWER($1)
+        `,
         [userInput],
       );
 
-      const user: any = data.rows[0];
-      if (!user) {
-        return res.status(401).json({ message: "Usuario ou senha inválidas" });
+      const foundUser = data.rows[0];
+
+      if (!foundUser) {
+        return res.status(401).json({ message: "Usuario ou senha invalida" });
       }
 
-      if (!user.password || user.password.trim() === "") {
-        return res.status(401).json({ message: "Usuario ou senha inválida" });
+      if (!foundUser.password || foundUser.password.trim() === "") {
+        return res.status(401).json({ message: "Usuario ou senha invalida" });
       }
 
-      const passwordValid = await authPass(password, user.password);
+      const passwordValid = await authPass(password, foundUser.password);
 
       if (!passwordValid) {
-        return res.status(401).json({ message: "Usuario ou senha inválida" });
+        return res.status(401).json({ message: "Usuario ou senha invalida" });
       }
 
-      const token = await AuthSign(user);
+      const token = await AuthSign(foundUser);
 
       return res.status(200).json({
         message: "Login realizado com sucesso",
-        token: token,
+        token,
         user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          age: user.age,
-          role: user.role,
+          id: foundUser.id,
+          name: foundUser.name,
+          email: foundUser.email,
+          age: foundUser.age,
+          role: foundUser.role,
         },
       });
     } catch (error) {
       console.error("Erro no login:", error);
-      res.status(500).json({ message: "Erro interno do servidor", error });
+      return res.status(500).json({ message: "Erro interno do servidor", error });
     }
   });
 
-  router.get("/", (req, res) => {
+  router.get("/", (_req, res) => {
     res.json("Login funcionando");
   });
 
-  // Rota protegida para testar
-  router.get("/user/me", verifyToken, (req: any, res) => {
+  router.get("/user/me", verifyToken, (req: AuthenticatedRequest, res) => {
     res.json({
       message: "Acesso autorizado!",
       user: req.user,
     });
   });
+
   return router;
 }
